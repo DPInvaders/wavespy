@@ -10,7 +10,7 @@ install_requires = [
     'mnemonic==0.18',
     'pysha3==1.0.2',
     'python-axolotl-curve25519==0.4.1.post2',
-    'requests==2.21.0',
+    'requests==2.31.0',
     'ujson==1.35',
 ]
 
