@@ -32,6 +32,7 @@ DEFAULT_SPONSORSHIP_TRANSACTION_FEE = 100000000
 DEFAULT_SET_SCRIPT_TRANSACTION_FEE = 1000000
 DEFAULT_SET_ASSET_SCRIPT_TRANSACTION_FEE = 100000000
 DEFAULT_DATA_TRANSACTION_FEE_MULTIPLICATOR = 1000000
+DEFAULT_INVOKE_SCRIPT_TRANSACTION_FEE = 500000
 
 TRANSACTION_TYPE_GENESIS = 1
 TRANSACTION_TYPE_PAYMENT = 2
@@ -91,7 +92,7 @@ class BaseWavesAddress:
     :param online: make requests or return only request data
     :param client_request_params: client API request param (check API client doc)
     """
-    
+
     def __init__(self, value=None, private_key=None, public_key=None, address_seed=None, chain_id=None, nonce=0,
                  node_address=DEFAULT_NODE_ADDRESS, version=DEFAULT_ADDRESS_VERSION, online=True,
                  client_request_params=None):
@@ -109,7 +110,7 @@ class BaseWavesAddress:
         self.online = online
         self.client_request_params = client_request_params
         self._api_client = None
-        
+
     def save_as_json(self, file_path, encode_seed=False):
         """
         Save address data as json
@@ -144,7 +145,7 @@ class BaseWavesAddress:
             self.seed = base58.b58decode(self.seed)
 
         self.chain_id = file_data.get('chain_id')
-        
+
     def _generate_asset_sponsorship_transaction(self, asset_id, min_sponsored_asset_fee, transaction_fee, timestamp):
         """
         Prepare data for sponsorship transaction
@@ -580,7 +581,7 @@ class BaseWavesAddress:
         }
 
         return transaction_data
-    
+
     def _generate_mass_transfer_transaction(self, transfer_data, asset_id, attachment, version, timestamp):
         """
         Setup mass transfer transaction data
@@ -724,6 +725,122 @@ class BaseWavesAddress:
 
         return transaction_data
 
+    def _generate_invoke_script_transaction(self, dapp_address, function_name, params, payments, fee_asset_id,
+                                            transaction_fee, timestamp, version):
+        """
+        Generate invoke script transaction data
+
+        :param dapp_address:
+        :param function_name:
+        :param params:
+        :param payments:
+        :param fee_asset_id:
+        :param timestamp:
+        :param version:
+        :return:
+        """
+        if not timestamp:
+            timestamp_param = int(time.time() * 1000)
+        else:
+            timestamp_param = timestamp
+
+        def _encode_invoke_params(invoke_params):
+            invoke_params_bytes = []
+            for param in invoke_params:
+                if param['type'] == 'integer':
+                    invoke_params_bytes.append(b'\0' + struct.pack(">q", param['value']))
+                elif param['type'] == 'binary':
+                    invoke_params_bytes.append(
+                        b'\1' + struct.pack(">L", len(param['value'])) + param['value'].encode('latin-1')
+                    )
+                elif param['type'] == 'string':
+                    invoke_params_bytes.append(
+                        b'\2' + struct.pack(
+                            ">I", len(param['value'].encode('latin-1'))) + param['value'].encode('latin-1')
+                    )
+                elif param['type'] == 'boolean':
+                    if param['value'] is True:
+                        invoke_params_bytes.append(b'\6')
+                    elif param['value'] is False:
+                        invoke_params_bytes.append(b'\7')
+                    else:
+                        raise ValueError("incorrect boolean value")
+                elif param['type'] == 'list':
+                    params_bytes.append(b'\x0b')
+                    params_bytes.append(struct.pack(">I", len(param['value'])))
+                    list_params = _encode_invoke_params(param['value'])
+                    params_bytes.append(list_params)
+
+            return invoke_params_bytes
+
+        sign_data = [
+            TRANSACTION_TYPE_INVOKE_SCRIPT.to_bytes(1, 'big'),
+            version.to_bytes(1, 'big'),
+            base58.b58decode(self.public_key),
+            base58.b58decode(dapp_address),
+            function_name.encode('latin-1'),
+            struct.pack(">Q", transaction_fee),
+            struct.pack(">Q", timestamp_param)
+        ]
+        if function_name is not None:
+            sign_data.insert(5, version.to_bytes(1, 'big'))
+        else:
+            sign_data.insert(5, b'\0')
+
+        if fee_asset_id is not None:
+            sign_data.insert(6, base58.b58decode(fee_asset_id))
+        else:
+            sign_data.insert(6, b'\0')
+
+        if params is not None:
+            params_bytes = []
+            encoded_params = _encode_invoke_params(params)
+            sign_data.insert(8, b"".join(encoded_params))
+
+        payments_encoded = []
+        for payment in payments:
+            payment_encoded = []
+            payment_encoded.append(struct.pack(">Q", payment['amount']))
+            payment_encoded.append(b'\1')
+            if payment['assetId'] not in ('null', None, ''):
+                payment_asset_id_byte = base58.b58decode(payment['assetId'])
+            else:
+                payment_asset_id_byte = b'\0'
+            payment_encoded.append(payment_asset_id_byte)
+            payment_bytes = b"".join(payment_encoded)
+            payment_encoded.append(struct.pack(">H", len(payment_bytes)) + payment_bytes)
+
+        sign_data.insert(9, b"".join(payments_encoded))
+
+        if fee_asset_id is not None:
+            sign_data.insert(10, b"\1")
+            sign_data.insert(11, base58.b58decode(fee_asset_id))
+        else:
+            sign_data.insert(10, b"\0")
+            sign_data.insert(11, b"\0")
+
+        signature = sign_with_private_key(self.private_key, b''.join(sign_data))
+
+        transaction_data = {
+            "type": TRANSACTION_TYPE_INVOKE_SCRIPT,
+            "senderPublicKey": self.public_key,
+            "version": version,
+            "timestamp": timestamp_param,
+            "fee": transaction_fee,
+            "proofs": [signature],
+            "feeAssetId": fee_asset_id,
+            "dApp": dapp_address,
+            "payment": payments
+        }
+
+        if function_name is not None:
+            transaction_data['call'] = {
+                "function": function_name,
+                "args": params
+            }
+
+        return transaction_data
+
     @property
     def can_sign(self):
         """
@@ -763,7 +880,7 @@ class BaseWavesAddress:
         :rtype: bytes
         """
         return base58.b58encode(self.seed.encode('latin-1')).decode()
-        
+
 
 class WavesAddress(BaseWavesAddress):
     """
@@ -1209,6 +1326,29 @@ class WavesAddress(BaseWavesAddress):
         """
         transaction_data = self._generate_set_asset_script_transaction(
             script, asset_id, transaction_fee, timestamp, version
+        )
+        result = self._api_client.transaction_broadcast(transaction_data)
+        return result
+
+    def invoke_script(self, dapp_address, function_name,
+                      params=None, payments=None, fee_asset_id=None,
+                      transaction_fee=DEFAULT_INVOKE_SCRIPT_TRANSACTION_FEE,
+                      timestamp=None, version=DEFAULT_TRANSACTION_VERSION):
+        """
+        Invoke script
+
+        :param dapp_address:
+        :param function_name:
+        :param params:
+        :param payments:
+        :param fee_asset_id:
+        :param transaction_fee:
+        :param timestamp:
+        :param version:
+        :return:
+        """
+        transaction_data = self._generate_invoke_script_transaction(
+            dapp_address, function_name, params, payments, fee_asset_id, transaction_fee, timestamp, version
         )
         result = self._api_client.transaction_broadcast(transaction_data)
         return result
