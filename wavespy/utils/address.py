@@ -776,30 +776,31 @@ class BaseWavesAddress:
         sign_data = [
             TRANSACTION_TYPE_INVOKE_SCRIPT.to_bytes(1, 'big'),
             version.to_bytes(1, 'big'),
+            self.chain_id.encode('latin-1'),
             base58.b58decode(self.public_key),
             base58.b58decode(dapp_address),
-            function_name.encode('latin-1'),
-            struct.pack(">Q", transaction_fee),
-            struct.pack(">Q", timestamp_param)
+            b'\x01',  # Function presence flag #TODO: add value for default function
+            b'\x09',  # Function call ID
+            b'\x01',  # Function type ID
         ]
         if function_name is not None:
-            sign_data.insert(5, version.to_bytes(1, 'big'))
+            sign_data.append(struct.pack(">L", len(function_name.encode('latin-1'))))
+            sign_data.append(function_name.encode('latin-1'))
         else:
-            sign_data.insert(5, b'\0')
+            sign_data.append(b'\0')
 
         if fee_asset_id is not None:
-            sign_data.insert(6, base58.b58decode(fee_asset_id))
-        else:
-            sign_data.insert(6, b'\0')
+            sign_data.append(base58.b58decode(fee_asset_id))
 
         if params is not None:
             params_bytes = []
             encoded_params = _encode_invoke_params(params)
-            sign_data.insert(8, b"".join(encoded_params))
+            sign_data.append(struct.pack(">I", len(params)))
+            sign_data.append(b"".join(encoded_params))
 
-        payments_encoded = []
+        payments_encoded = list()
         for payment in payments:
-            payment_encoded = []
+            payment_encoded = list()
             payment_encoded.append(struct.pack(">Q", payment['amount']))
             payment_encoded.append(b'\1')
             if payment['assetId'] not in ('null', None, ''):
@@ -808,17 +809,19 @@ class BaseWavesAddress:
                 payment_asset_id_byte = b'\0'
             payment_encoded.append(payment_asset_id_byte)
             payment_bytes = b"".join(payment_encoded)
-            payment_encoded.append(struct.pack(">H", len(payment_bytes)) + payment_bytes)
+            payments_encoded.append(struct.pack(">H", len(payment_bytes)) + payment_bytes)
 
-        sign_data.insert(9, b"".join(payments_encoded))
+        sign_data.append(struct.pack(">H", len(payments)))
+        sign_data.append(b"".join(payments_encoded))
 
+        sign_data.append(struct.pack(">Q", transaction_fee))
         if fee_asset_id is not None:
-            sign_data.insert(10, b"\1")
-            sign_data.insert(11, base58.b58decode(fee_asset_id))
+            sign_data.append(b"\1")
+            sign_data.append(base58.b58decode(fee_asset_id))
         else:
-            sign_data.insert(10, b"\0")
-            sign_data.insert(11, b"\0")
+            sign_data.append(b"\0")
 
+        sign_data.append(struct.pack(">Q", timestamp_param))
         signature = sign_with_private_key(self.private_key, b''.join(sign_data))
 
         transaction_data = {
